@@ -57,3 +57,7 @@ externalPort = 3000
 deploymentTarget = "static"
 build = ["npm", "--prefix", "frontend", "run", "build"]
 publicDir = "frontend/dist"
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 120000
