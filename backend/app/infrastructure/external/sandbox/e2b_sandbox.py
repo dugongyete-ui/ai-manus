@@ -2,7 +2,8 @@ from typing import Optional, BinaryIO, Dict
 import io
 import logging
 import asyncio
-from e2b import AsyncSandbox as E2BSandboxSDK
+from e2b_desktop import Sandbox as E2BDesktopSDK
+from e2b import AsyncSandbox as E2BAsyncSDK
 from app.core.config import get_settings
 from app.domain.models.tool_result import ToolResult
 from app.domain.external.sandbox import Sandbox
@@ -18,9 +19,24 @@ class ShellSession:
 
 
 class E2BSandbox(Sandbox):
-    def __init__(self, sandbox: E2BSandboxSDK, sandbox_id: str):
-        self._sandbox = sandbox
+    """
+    E2B Desktop Sandbox implementation.
+
+    Uses e2b_desktop.Sandbox (sync) for desktop creation and VNC streaming,
+    and e2b.AsyncSandbox (async) for file and command operations.
+    """
+
+    def __init__(
+        self,
+        async_sandbox: E2BAsyncSDK,
+        sandbox_id: str,
+        vnc_url: str = "",
+        cdp_url: str = "",
+    ):
+        self._sandbox = async_sandbox
         self._sandbox_id = sandbox_id
+        self._vnc_url = vnc_url
+        self._cdp_url = cdp_url
         self._sessions: Dict[str, ShellSession] = {}
 
     @property
@@ -29,11 +45,11 @@ class E2BSandbox(Sandbox):
 
     @property
     def cdp_url(self) -> str:
-        return ""
+        return self._cdp_url
 
     @property
     def vnc_url(self) -> str:
-        return ""
+        return self._vnc_url
 
     def _get_session(self, session_id: str) -> ShellSession:
         if session_id not in self._sessions:
@@ -52,11 +68,11 @@ class E2BSandbox(Sandbox):
             full_command = f"cd {exec_dir} 2>/dev/null || true && {command}"
 
             def on_stdout(output):
-                line = output.line if hasattr(output, 'line') else str(output)
+                line = output.line if hasattr(output, "line") else str(output)
                 session.output_lines.append(line + "\n")
 
             def on_stderr(output):
-                line = output.line if hasattr(output, 'line') else str(output)
+                line = output.line if hasattr(output, "line") else str(output)
                 session.output_lines.append(line + "\n")
 
             handle = await self._sandbox.commands.run(
@@ -70,7 +86,7 @@ class E2BSandbox(Sandbox):
             return ToolResult(
                 success=True,
                 message="Command started",
-                data={"session_id": session_id}
+                data={"session_id": session_id},
             )
         except Exception as e:
             session.is_running = False
@@ -83,7 +99,7 @@ class E2BSandbox(Sandbox):
         return ToolResult(
             success=True,
             message="Shell view",
-            data={"output": output, "running": session.is_running}
+            data={"output": output, "running": session.is_running},
         )
 
     async def wait_for_process(self, session_id: str, seconds: Optional[int] = None) -> ToolResult:
@@ -125,9 +141,15 @@ class E2BSandbox(Sandbox):
                 logger.warning(f"Failed to kill process: {e}")
         return ToolResult(success=True, message="Process killed")
 
-    async def file_write(self, file: str, content: str, append: bool = False,
-                         leading_newline: bool = False, trailing_newline: bool = False,
-                         sudo: bool = False) -> ToolResult:
+    async def file_write(
+        self,
+        file: str,
+        content: str,
+        append: bool = False,
+        leading_newline: bool = False,
+        trailing_newline: bool = False,
+        sudo: bool = False,
+    ) -> ToolResult:
         try:
             final_content = content
             if leading_newline:
@@ -147,8 +169,13 @@ class E2BSandbox(Sandbox):
         except Exception as e:
             return ToolResult(success=False, message=str(e))
 
-    async def file_read(self, file: str, start_line: int = None,
-                        end_line: int = None, sudo: bool = False) -> ToolResult:
+    async def file_read(
+        self,
+        file: str,
+        start_line: int = None,
+        end_line: int = None,
+        sudo: bool = False,
+    ) -> ToolResult:
         try:
             content = await self._sandbox.files.read(file)
             if start_line or end_line:
@@ -183,8 +210,8 @@ class E2BSandbox(Sandbox):
             items = []
             for f in files:
                 items.append({
-                    "name": f.name if hasattr(f, 'name') else str(f),
-                    "type": f.type if hasattr(f, 'type') else "unknown"
+                    "name": f.name if hasattr(f, "name") else str(f),
+                    "type": f.type if hasattr(f, "type") else "unknown",
                 })
             return ToolResult(success=True, message="Directory listed", data=items)
         except Exception as e:
@@ -201,8 +228,14 @@ class E2BSandbox(Sandbox):
 
     async def file_search(self, file: str, regex: str, sudo: bool = False) -> ToolResult:
         try:
-            result = await self._sandbox.commands.run(f"grep -n '{regex}' '{file}' 2>&1 || true")
-            return ToolResult(success=True, message="Search done", data={"matches": result.stdout or ""})
+            result = await self._sandbox.commands.run(
+                f"grep -n '{regex}' '{file}' 2>&1 || true"
+            )
+            return ToolResult(
+                success=True,
+                message="Search done",
+                data={"matches": result.stdout or ""},
+            )
         except Exception as e:
             return ToolResult(success=False, message=str(e))
 
@@ -237,27 +270,120 @@ class E2BSandbox(Sandbox):
             return False
 
     async def get_browser(self):
-        raise NotImplementedError("Browser via VNC is not supported in E2B sandbox mode")
+        """Launch Chrome with CDP in the desktop sandbox and return a browser instance."""
+        from app.infrastructure.external.browser.playwright_browser import PlaywrightBrowser
+        try:
+            from app.infrastructure.external.browser.browser_use_browser import BrowserUseBrowser
+            _has_browser_use = True
+        except ImportError:
+            _has_browser_use = False
+
+        settings = get_settings()
+        try:
+            # Start Chrome with remote debugging in the desktop display
+            chrome_cmd = (
+                "DISPLAY=:99 google-chrome "
+                "--remote-debugging-port=9222 "
+                "--no-sandbox "
+                "--disable-dev-shm-usage "
+                "--no-first-run "
+                "--no-default-browser-check "
+                "about:blank &"
+            )
+            await self._sandbox.commands.run(chrome_cmd, background=True)
+            # Give Chrome time to start
+            await asyncio.sleep(2)
+
+            cdp_host = await self._sandbox.get_host(9222)
+            self._cdp_url = f"http://{cdp_host}"
+            logger.info(f"Chrome CDP available at: {self._cdp_url}")
+
+            if _has_browser_use and settings.browser_use_engine == "browser_use":
+                logger.info("Using BrowserUseBrowser engine for CDP URL: %s", self._cdp_url)
+                return BrowserUseBrowser(self._cdp_url)
+            logger.info("Using PlaywrightBrowser engine for CDP URL: %s", self._cdp_url)
+            return PlaywrightBrowser(self._cdp_url)
+        except Exception as e:
+            logger.error(f"Failed to start browser in E2B Desktop sandbox: {e}")
+            raise
 
     @classmethod
-    async def create(cls) -> 'E2BSandbox':
+    async def create(cls) -> "E2BSandbox":
+        """Create a new E2B Desktop sandbox with VNC streaming."""
         settings = get_settings()
         api_key = settings.e2b_api_key
-        sandbox = await E2BSandboxSDK.create(
-            api_key=api_key,
-            timeout=3600,
+
+        logger.info("Creating E2B Desktop sandbox...")
+
+        # Create desktop sandbox in thread pool (sync SDK call)
+        desktop_sandbox = await asyncio.to_thread(
+            lambda: E2BDesktopSDK.create(
+                resolution=(1280, 720),
+                dpi=96,
+                timeout=3600,
+                api_key=api_key,
+            )
         )
-        sandbox_id = sandbox.sandbox_id if hasattr(sandbox, 'sandbox_id') else str(id(sandbox))
-        logger.info(f"Created E2B sandbox: {sandbox_id}")
-        return cls(sandbox=sandbox, sandbox_id=sandbox_id)
 
-    @classmethod
-    async def get(cls, sandbox_id: str) -> 'E2BSandbox':
-        settings = get_settings()
-        api_key = settings.e2b_api_key
-        sandbox = await E2BSandboxSDK.connect(
+        sandbox_id = desktop_sandbox.sandbox_id
+        logger.info(f"E2B Desktop sandbox created: {sandbox_id}")
+
+        # Start VNC stream in thread pool (sync call)
+        try:
+            await asyncio.to_thread(desktop_sandbox.stream.start)
+            logger.info("VNC stream started")
+        except RuntimeError as e:
+            # Stream might already be running
+            logger.warning(f"Stream start warning: {e}")
+
+        # Build WebSocket VNC URL: noVNC websockify endpoint
+        vnc_host = desktop_sandbox.get_host(6080)
+        ws_vnc_url = f"wss://{vnc_host}/websockify"
+        logger.info(f"VNC WebSocket URL: {ws_vnc_url}")
+
+        # Connect async sandbox for async file/command operations
+        async_sandbox = await E2BAsyncSDK.connect(
             sandbox_id=sandbox_id,
             api_key=api_key,
         )
-        logger.info(f"Connected to E2B sandbox: {sandbox_id}")
-        return cls(sandbox=sandbox, sandbox_id=sandbox_id)
+
+        return cls(
+            async_sandbox=async_sandbox,
+            sandbox_id=sandbox_id,
+            vnc_url=ws_vnc_url,
+        )
+
+    @classmethod
+    async def get(cls, sandbox_id: str) -> "E2BSandbox":
+        """Reconnect to an existing E2B Desktop sandbox."""
+        settings = get_settings()
+        api_key = settings.e2b_api_key
+
+        logger.info(f"Reconnecting to E2B Desktop sandbox: {sandbox_id}")
+
+        # Connect desktop sandbox (sync) in thread pool to retrieve VNC URL
+        try:
+            desktop_sandbox = await asyncio.to_thread(
+                lambda: E2BDesktopSDK.connect(
+                    sandbox_id=sandbox_id,
+                    api_key=api_key,
+                )
+            )
+            vnc_host = desktop_sandbox.get_host(6080)
+            ws_vnc_url = f"wss://{vnc_host}/websockify"
+        except Exception as e:
+            logger.warning(f"Could not get VNC URL for sandbox {sandbox_id}: {e}")
+            ws_vnc_url = ""
+
+        # Connect async sandbox for async operations
+        async_sandbox = await E2BAsyncSDK.connect(
+            sandbox_id=sandbox_id,
+            api_key=api_key,
+        )
+
+        logger.info(f"Reconnected to E2B Desktop sandbox: {sandbox_id}, VNC WS: {ws_vnc_url}")
+        return cls(
+            async_sandbox=async_sandbox,
+            sandbox_id=sandbox_id,
+            vnc_url=ws_vnc_url,
+        )

@@ -31,7 +31,7 @@ docs/        # Dokumentasi arsitektur
 - **E2B:** E2B Cloud Sandbox untuk eksekusi task agent
 - **Auth:** Local auth (`admin@example.com` / `admin123`)
 
-## Perubahan dari Docker ke E2B
+## Perubahan dari Docker ke E2B Desktop
 - Semua Dockerfile dihapus
 - `docker_sandbox.py` digantikan oleh `backend/app/infrastructure/external/sandbox/e2b_sandbox.py`
 - `dependencies.py` diupdate untuk menggunakan `E2BSandbox`
@@ -40,11 +40,22 @@ docs/        # Dokumentasi arsitektur
 - Import `langchain_classic` diperbaiki ke `langchain` 1.x compatible
 - `RetryWithErrorOutputParser` digantikan dengan implementasi retry custom
 
+## E2B Desktop Sandbox (VNC Support)
+- **Package:** `e2b-desktop==2.3.0` + `e2b==2.19.0`
+- **Template:** Ubuntu 22.04 + XFCE desktop dengan noVNC streaming
+- **VNC Flow:** `E2BDesktopSDK.create()` → `stream.start()` → `wss://{sandbox-id}-6080.e2b.dev/websockify`
+- **CDP Flow:** Chrome di DISPLAY=:99 → CDP port 9222 → `http://{sandbox-id}-9222.e2b.dev`
+- **Dual SDK pattern:** 
+  - `e2b_desktop.Sandbox` (sync, thread pool) untuk desktop creation & VNC URL
+  - `e2b.AsyncSandbox` (async) untuk file/command operations
+- **Browser imports:** Lazy-loaded di `get_browser()` untuk hindari startup error jika `browser_use` tidak terinstall
+
 ## Akses Login
 - Email: `admin@example.com`
 - Password: `admin123`
 
 ## Catatan
-- Browser/VNC tool tidak tersedia di E2B sandbox (hanya shell, file, dan search tools yang berfungsi)
 - Backend menggunakan `localhost` sebagai host, frontend menggunakan `0.0.0.0`
 - Frontend proxy `/api` → `http://localhost:8000`
+- VNC view menggunakan noVNC (RFB protocol via WebSocket) yang sudah ada di frontend
+- Backend VNC WebSocket proxy di `/sessions/{id}/vnc` meneruskan ke E2B Desktop noVNC
