@@ -14,11 +14,14 @@ from app.domain.models.event import (
 )
 from app.domain.repositories.agent_repository import AgentRepository
 from langchain.chat_models import init_chat_model
-from langchain_classic.output_parsers.retry import RetryWithErrorOutputParser
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import PromptTemplate
 from app.core.config import get_settings
-from langchain.messages import AIMessage, HumanMessage, ToolCall, ToolMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, SystemMessage
+try:
+    from langchain_core.messages import ToolCall
+except ImportError:
+    ToolCall = dict
 from app.domain.services.tools.base import Tool
 from app.domain.utils.robust_json_parser import RobustJsonParser, ToolCallParseError
 
@@ -60,18 +63,27 @@ class BaseAgent(ABC):
         if settings.extra_headers:
             kwargs["default_headers"] = settings.extra_headers
         self._model = init_chat_model(**kwargs)
-        self._json_output_parser = RetryWithErrorOutputParser.from_llm(
-            parser=JsonOutputParser(),
-            llm=self._model,
-            max_retries=self.max_retries,
-        )
+        self._json_parser = JsonOutputParser()
         self.toolkits = tools
         self.memory = None
 
     async def _parse_json(self, text: str) -> dict:
-        """Parse JSON from LLM output using RetryWithErrorOutputParser."""
-        prompt_value = self._JSON_PARSE_PROMPT.format_prompt(input=text)
-        return await self._json_output_parser.aparse_with_prompt(text, prompt_value)
+        """Parse JSON from LLM output with retry logic."""
+        last_error = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                return self._json_parser.parse(text)
+            except Exception as e:
+                last_error = e
+                if attempt < self.max_retries:
+                    try:
+                        prompt = self._JSON_PARSE_PROMPT.format(input=text)
+                        response = await self._model.ainvoke(prompt)
+                        text = response.content if hasattr(response, 'content') else str(response)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(self.retry_interval)
+        raise last_error
     
     def get_tool(self, name: str) -> Optional[Tool]:
         """Get specified tool"""

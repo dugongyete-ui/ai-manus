@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     # Extra headers for LLM requests (parsed from EXTRA_HEADERS env var, JSON)
     extra_headers: dict | None = None
     
+    # E2B sandbox configuration
+    e2b_api_key: str | None = None
+
     # Claw (OpenClaw) configuration
     claw_enabled: bool = True
     claw_image: str = "simpleyyt/manus-claw"
@@ -125,9 +128,9 @@ class Settings(BaseSettings):
 @lru_cache()
 def get_settings() -> Settings:
     """Get application settings"""
-    if not os.environ.get("OPENAI_API_KEY"):
-        os.environ["OPENAI_API_KEY"] = os.getenv("API_KEY")
     settings = Settings()
     settings.extra_headers = _parse_extra_headers()
+    if not os.environ.get("OPENAI_API_KEY") and settings.api_key:
+        os.environ["OPENAI_API_KEY"] = settings.api_key
     settings.validate()
     return settings 
