@@ -298,7 +298,7 @@ class E2BSandbox(Sandbox):
             self._cdp_url = f"http://{cdp_host}"
             logger.info(f"Chrome CDP available at: {self._cdp_url}")
 
-            if _has_browser_use and settings.browser_use_engine == "browser_use":
+            if _has_browser_use and settings.browser_engine == "browser_use":
                 logger.info("Using BrowserUseBrowser engine for CDP URL: %s", self._cdp_url)
                 return BrowserUseBrowser(self._cdp_url)
             logger.info("Using PlaywrightBrowser engine for CDP URL: %s", self._cdp_url)
