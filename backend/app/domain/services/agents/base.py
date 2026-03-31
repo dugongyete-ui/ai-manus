@@ -177,6 +177,42 @@ class BaseAgent(ABC):
         self.memory.roll_back()
         await self._repository.save_memory(self._agent_id, self.name, self.memory)
 
+    def _normalize_messages(self, messages):
+        """Normalize message content to strings for LLM providers that don't support array content.
+        
+        Some LLM providers (e.g. Cloudflare Workers AI) only accept plain strings as
+        message content. LangChain sometimes serializes content as a list of dicts
+        (multi-modal format) when tools are bound. This method flattens any list
+        content back to a plain string, and replaces None content with an empty string.
+        """
+        normalized = []
+        for msg in messages:
+            if isinstance(msg.content, list):
+                text_parts = []
+                for part in msg.content:
+                    if isinstance(part, str):
+                        text_parts.append(part)
+                    elif isinstance(part, dict):
+                        if part.get("type") == "text":
+                            text_parts.append(part.get("text", ""))
+                        elif part.get("type") == "tool_result":
+                            inner = part.get("content", "")
+                            if isinstance(inner, list):
+                                for item in inner:
+                                    if isinstance(item, dict) and item.get("type") == "text":
+                                        text_parts.append(item.get("text", ""))
+                                    else:
+                                        text_parts.append(str(item))
+                            else:
+                                text_parts.append(str(inner))
+                        else:
+                            text_parts.append(str(part))
+                msg = msg.model_copy(update={"content": "\n".join(text_parts)})
+            elif msg.content is None:
+                msg = msg.model_copy(update={"content": ""})
+            normalized.append(msg)
+        return normalized
+
     async def ask_with_messages(self, messages: List[Dict[str, Any]], format: Optional[str] = None) -> AIMessage:
         await self._add_to_memory(messages)
 
@@ -193,7 +229,7 @@ class BaseAgent(ABC):
             | RobustJsonParser.from_llm(self._model)
         )
 
-        context = list(self.memory.get_messages())
+        context = self._normalize_messages(list(self.memory.get_messages()))
         for attempt in range(self.max_retries):
             try:
                 message: AIMessage = await chain.ainvoke(context)
