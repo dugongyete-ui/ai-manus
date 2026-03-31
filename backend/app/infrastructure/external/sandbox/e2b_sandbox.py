@@ -294,7 +294,7 @@ class E2BSandbox(Sandbox):
             # Give Chrome time to start
             await asyncio.sleep(2)
 
-            cdp_host = await self._sandbox.get_host(9222)
+            cdp_host = self._sandbox.get_host(9222)
             self._cdp_url = f"http://{cdp_host}"
             logger.info(f"Chrome CDP available at: {self._cdp_url}")
 
