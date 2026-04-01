@@ -18,12 +18,14 @@ from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import PromptTemplate
 from app.core.config import get_settings
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, SystemMessage
+from langchain_core.runnables import RunnableLambda
 try:
     from langchain_core.messages import ToolCall
 except ImportError:
     ToolCall = dict
 from app.domain.services.tools.base import Tool
 from app.domain.utils.robust_json_parser import RobustJsonParser, ToolCallParseError
+from app.domain.utils.cloudflare_model_wrapper import make_cloudflare_compatible
 
 
 logger = logging.getLogger(__name__)
@@ -62,7 +64,7 @@ class BaseAgent(ABC):
         )
         if settings.extra_headers:
             kwargs["default_headers"] = settings.extra_headers
-        self._model = init_chat_model(**kwargs)
+        self._model = make_cloudflare_compatible(init_chat_model(**kwargs))
         self._json_parser = JsonOutputParser()
         self.toolkits = tools
         self.memory = None
@@ -122,10 +124,15 @@ class BaseAgent(ABC):
                 break
             tool_responses = []
             for tool_call in message.tool_calls:
-                function_name = tool_call["name"]
-                tool_call_id = tool_call["id"] = tool_call["id"] or str(uuid.uuid4())
-                function_args = tool_call["args"]
-                
+                function_name = tool_call.get("name")
+                tool_call_id = tool_call.get("id") or str(uuid.uuid4())
+                tool_call["id"] = tool_call_id
+                function_args = tool_call.get("args", {})
+
+                if not function_name:
+                    logger.warning("Received tool call with empty/missing name, skipping")
+                    continue
+
                 tool = self.get_tool(function_name)
                 if not tool:
                     yield ErrorEvent(error=f"Unknown tool: {function_name}")
@@ -153,6 +160,10 @@ class BaseAgent(ABC):
                 )
 
                 tool_responses.append(tool_result)
+
+            if not tool_responses:
+                logger.warning("No valid tool calls were executed in this iteration; stopping loop")
+                break
 
             message = await self.ask_with_messages(tool_responses)
         else:
@@ -222,14 +233,19 @@ class BaseAgent(ABC):
 
         # Stage 1-3: model chain | RobustJsonParser repairs invalid tool call JSON.
         # Stages 4-5: outer retry loop handles cases that survive stages 1-3.
+        # Normalization is applied inside the chain via RunnableLambda so that
+        # it runs after any message transformations LangChain applies, ensuring
+        # the Cloudflare AI gateway receives plain-string content in every message.
+        normalize = RunnableLambda(self._normalize_messages)
         chain = (
-            self._model
+            normalize
+            | self._model
             .bind(response_format=response_format, tool_choice=self.tool_choice)
             .bind_tools(self.get_tools())
             | RobustJsonParser.from_llm(self._model)
         )
 
-        context = self._normalize_messages(list(self.memory.get_messages()))
+        context = list(self.memory.get_messages())
         for attempt in range(self.max_retries):
             try:
                 message: AIMessage = await chain.ainvoke(context)
